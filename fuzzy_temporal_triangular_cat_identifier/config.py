@@ -6,35 +6,53 @@ import pandas as pd
 class FuzzyTemporalTriangularConfig:
     """Configuration for fuzzy temporal cat identification with triangular sigma-band selection."""
     root_output_folder: str | None = None
+
+    # Unit conversion
     lb_to_kg: float = 0.45359237
+
+    # Sigma configuration in pounds
     base_sigma_lb: float = 0.15
     min_dynamic_sigma_lb: float = 0.15
     max_dynamic_sigma_lb: float = 5.0
     sigma_iterations: int = 8
+    # Temporal behavior
     temporal_weight: float = 0.40
     state_alpha: float = 0.60
     decay_minutes: float = 180.0
+    # Data columns
     device_col: str = "device_serial"
     enroll_round_dp: int = 2
+    # Prediction control flags
     use_dynamic_sigma_in_prediction: bool = True
     use_overlap_penalty_in_prediction: bool = True
     use_consistency_penalty_in_prediction: bool = True
+    # Penalty configuration
     overlap_penalty_strength: float = 0.35
     consistency_penalty_strength: float = 0.30
     min_score_factor: float = 0.05
+    # Diagnostic thresholds
     high_overlap_score: float = 0.70
     medium_overlap_score: float = 0.40
     low_consistency_score: float = 0.50
     medium_consistency_score: float = 0.70
-    
-    # === ABSTENTION LOGIC ADDITIONS ===
+
+    # =====================================================
+    # ABSTENTION CONFIG - Combined Strategy
+    # =====================================================
     use_abstention: bool = True
     abstain_label: str = "unknown"
+
+    # Abstain if confidence is lower than this threshold.
     confidence_threshold: float = 0.50
+
+    # Abstain if the raw predicted cat has overlap higher than this threshold.
     overlap_abstention_threshold: float = 0.70
+
+    # Abstain if top-1 and top-2 combined scores are too close.
     score_gap_threshold: float = 0.10
     # ==================================
 
+    # Triangular sigma bands in pounds
     sigma_bands_lb: dict = field(default_factory=lambda: {
         "sigma_0_5_to_1_0_lb": {"left": 0.5, "center": 0.75, "right": 1.0, "representative": 0.75},
         "sigma_1_0_to_2_0_lb": {"left": 1.0, "center": 1.5, "right": 2.0, "representative": 1.5},

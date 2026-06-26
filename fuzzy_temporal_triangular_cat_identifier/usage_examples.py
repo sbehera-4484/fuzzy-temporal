@@ -42,8 +42,10 @@ def example_run_with_abstention_enabled():
     # 4. View raw timeline log metrics
     print("\n=== Sample Predictions Timeline ===")
     cols_to_show = [
-        "user_id", "event_timestamp", "recorded_weight", "true_label", 
-        "raw_predicted_cat", "predicted_cat", "abstained", "abstention_reason", "confidence"
+        "user_id", "event_timestamp", "recorded_weight", "true_label",
+        "raw_predicted_cat", "predicted_cat", "predicted_name",
+        "abstained", "abstention_reason", "confidence",
+        "top1_top2_gap", "predicted_overlap_for_abstention", "correct"
     ]
     print(result.row_results[cols_to_show].head(10))
     
@@ -51,12 +53,24 @@ def example_run_with_abstention_enabled():
     print("\n=== User Summary Performance ===")
     print(result.user_accuracy.head())
 
+    if result.abstention_summary is not None:
+        print("\n=== Abstention Summary ===")
+        print(result.abstention_summary.head())
+
+    return result
+
 
 def example_in_memory_dataframe_run():
     # Example showing how to pass a pre-loaded pandas DataFrame manually
     input_file = r"C:\Users\shreetam_behera\Downloads\WBID_Dataset\123773\123773.csv"
-    
-    config = FuzzyTemporalTriangularConfig(use_abstention=True)
+
+    config = FuzzyTemporalTriangularConfig(
+        use_abstention=True,
+        confidence_threshold=0.50,
+        overlap_abstention_threshold=0.70,
+        score_gap_threshold=0.10,
+    )
+
     loader = CatVisitDataLoader(config)
     
     # Pre-load data in-memory
@@ -69,13 +83,88 @@ def example_in_memory_dataframe_run():
         save_outputs=False,
         save_confusion_matrices=False,
     )
-    print(f"Selective Accuracy on Decided Events: {result.selective_accuracy:.4f}")
+
+    print(f"Selective accuracy on decided events: {result.selective_accuracy:.4f}")
+    print(f"Coverage: {result.coverage * 100:.2f}%")
+    print(f"Abstention rate: {result.abstention_rate * 100:.2f}%")
+
+    return result
+
+
+def test_abstention_logic_with_synthetic_data():
+    """
+    Test function for validating abstention logic without external files.
+
+    This synthetic test creates a two-cat household with very close weights.
+    Because the measurements are between the two profiles, the model should
+    produce low gap / high overlap situations and abstain when thresholds are strict.
+    """
+    synthetic_df = pd.DataFrame({
+        "user_id": [999001] * 10,
+        "visit_date": ["2026-01-01"] * 10,
+        "visit_time": [
+            "08:00:00", "08:10:00", "08:20:00", "08:30:00", "08:40:00",
+            "09:00:00", "09:10:00", "09:20:00", "09:30:00", "09:40:00",
+        ],
+        "device_serial": ["device_test"] * 10,
+        "profile_weight": [4.00, 4.08] * 5,
+        "scale_weight": [4.03, 4.04, 4.05, 4.02, 4.04, 4.05, 4.03, 4.04, 4.02, 4.05],
+        "true_label_cat_name": ["cat_A", "cat_B"] * 5,
+    })
+
+    config = FuzzyTemporalTriangularConfig(
+        use_abstention=True,
+        abstain_label="unknown",
+        confidence_threshold=0.55,
+        overlap_abstention_threshold=0.60,
+        score_gap_threshold=0.15,
+        temporal_weight=0.40,
+        state_alpha=0.60,
+        decay_minutes=180.0,
+    )
+
+    result = run_triangular_fuzzy_temporal_pipeline_from_dataframe(
+        df=synthetic_df,
+        config=config,
+        save_outputs=False,
+        save_confusion_matrices=False,
+    )
+
+    print("\n[test] Abstention logic synthetic test")
+    print("Overall accuracy:", result.overall_accuracy)
+    print("Selective accuracy:", result.selective_accuracy)
+    print("Coverage:", result.coverage)
+    print("Abstention rate:", result.abstention_rate)
+
+    columns_to_show = [
+        "event_timestamp",
+        "recorded_weight",
+        "raw_predicted_cat",
+        "predicted_cat",
+        "predicted_name",
+        "confidence",
+        "top1_top2_gap",
+        "predicted_overlap_for_abstention",
+        "abstained",
+        "abstention_reason",
+        "correct_raw",
+        "correct",
+    ]
+    print(result.row_results[columns_to_show])
+
+    print("\n[test] Abstention summary")
+    print(result.abstention_summary)
+
+    assert "abstained" in result.row_results.columns
+    assert "abstention_reason" in result.row_results.columns
+    assert "raw_predicted_cat" in result.row_results.columns
+    assert "predicted_cat" in result.row_results.columns
+
+    return result
 
 
 if __name__ == "__main__":
-    # Ensure folders exist or change paths above before running
-    try:
-        example_run_with_abstention_enabled()
-        # example_in_memory_dataframe_run()
-    except FileNotFoundError:
-        print("[Warning] Please update the hardcoded file paths in usage_examples.py to match your environment.")
+    # Uncomment one example at a time.
+    # example_run_with_abstention_enabled()
+    example_in_memory_dataframe_run()
+    test_abstention_logic_with_synthetic_data()

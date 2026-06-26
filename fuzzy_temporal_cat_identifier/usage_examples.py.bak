@@ -110,13 +110,7 @@ def example_load_dataframe_then_run():
 def example_in_memory_only():
     input_file = r"C:\Users\shreetam_behera\Downloads\WBID_Dataset\10\10.csv" # 1086044
 
-    #config = FuzzyTemporalConfig()
-    config = FuzzyTemporalConfig(
-        use_abstention=True,
-        confidence_threshold=0.50,
-        overlap_abstention_threshold=0.70,
-        score_gap_threshold=0.10,
-    )    
+    config = FuzzyTemporalConfig()
     loader = CatVisitDataLoader(config)
     raw_df = loader.load_csv(input_file)
 
@@ -127,11 +121,9 @@ def example_in_memory_only():
         save_confusion_matrices=False,
     )
 
-    print("Overall accuracy with abstention:", result.overall_accuracy)
-    print("Selective accuracy:", result.selective_accuracy)
-    print("Coverage:", result.coverage)
-    print("Abstention rate:", result.abstention_rate)
+    print("Overall accuracy:", result.overall_accuracy)
     print(result.row_results.head())
+
 
 # =========================================================
 # TEST FUNCTION: Synthetic abstention validation

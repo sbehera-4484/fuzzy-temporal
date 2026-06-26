@@ -19,17 +19,10 @@ class FuzzyPredictionOutput:
     overall_accuracy: float
     confidence_algorithm: Dict[str, Any]
 
-    # Added for abstention-aware evaluation
-    abstention_summary: pd.DataFrame | None = None
-    selective_accuracy: float | None = None
-    coverage: float | None = None
-    abstention_rate: float | None = None
-    abstention_algorithm: Dict[str, Any] | None = None
-
 
 class FuzzyPredictor:
     """
-    Temporal fuzzy prediction class with combined abstention.
+    Temporal fuzzy prediction class.
 
     This class consumes only prepared DataFrames and artifacts created by FuzzyDiagnostic.
     """
@@ -39,8 +32,6 @@ class FuzzyPredictor:
         "confidence = max_cat(normalize((1 - temporal_weight) * current_weight_membership "
         "+ temporal_weight * temporal_prior))"
     )
-
-    ABSTENTION_ALGORITHM_NAME = "combined_confidence_overlap_gap_abstention"
 
     def __init__(self, config: FuzzyTemporalConfig):
         self.config = config
@@ -77,23 +68,6 @@ class FuzzyPredictor:
                 "overlap_penalty_strength": self.config.overlap_penalty_strength,
                 "consistency_penalty_strength": self.config.consistency_penalty_strength,
                 "base_sigma_lb": self.config.base_sigma_lb,
-            },
-        }
-
-    def abstention_algorithm_metadata(self) -> Dict[str, Any]:
-        return {
-            "name": self.ABSTENTION_ALGORITHM_NAME,
-            "decision_rule": (
-                "abstain if confidence < confidence_threshold OR "
-                "predicted_overlap_for_abstention > overlap_abstention_threshold OR "
-                "top1_top2_gap < score_gap_threshold"
-            ),
-            "abstain_label": self.config.abstain_label,
-            "parameters": {
-                "use_abstention": self.config.use_abstention,
-                "confidence_threshold": self.config.confidence_threshold,
-                "overlap_abstention_threshold": self.config.overlap_abstention_threshold,
-                "score_gap_threshold": self.config.score_gap_threshold,
             },
         }
 
@@ -160,50 +134,6 @@ class FuzzyPredictor:
 
         return self.normalize_scores(scores)
 
-    def apply_combined_abstention(
-        self,
-        raw_predicted_cat: str,
-        confidence: float,
-        combined: Dict[str, float],
-        overlap_map: Optional[Dict[str, float]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Combined abstention logic.
-
-        Abstain if ANY condition is true:
-            1. confidence < confidence_threshold
-            2. predicted overlap > overlap_abstention_threshold
-            3. top1_top2_gap < score_gap_threshold
-        """
-        sorted_items = sorted(combined.items(), key=lambda kv: kv[1], reverse=True)
-        top1_score = sorted_items[0][1] if len(sorted_items) >= 1 else np.nan
-        top2_score = sorted_items[1][1] if len(sorted_items) >= 2 else np.nan
-        top1_top2_gap = (top1_score - top2_score) if len(sorted_items) >= 2 else 1.0
-
-        predicted_overlap = overlap_map.get(raw_predicted_cat, 0.0) if overlap_map is not None else 0.0
-
-        reasons = []
-        if confidence < self.config.confidence_threshold:
-            reasons.append("low_confidence")
-        if predicted_overlap > self.config.overlap_abstention_threshold:
-            reasons.append("high_overlap")
-        if top1_top2_gap < self.config.score_gap_threshold:
-            reasons.append("small_top1_top2_gap")
-
-        abstained = self.config.use_abstention and len(reasons) > 0
-        final_predicted_cat = self.config.abstain_label if abstained else raw_predicted_cat
-
-        return {
-            "raw_predicted_cat": raw_predicted_cat,
-            "predicted_cat": final_predicted_cat,
-            "abstained": abstained,
-            "abstention_reason": ";".join(reasons) if reasons else "none",
-            "top1_score": top1_score,
-            "top2_score": top2_score,
-            "top1_top2_gap": top1_top2_gap,
-            "predicted_overlap_for_abstention": predicted_overlap,
-        }
-
     def predict_for_day(
         self,
         df_day: pd.DataFrame,
@@ -269,24 +199,16 @@ class FuzzyPredictor:
                 )
             updated_state = self.normalize_scores(updated_state)
 
-            raw_predicted_cat = max(combined, key=combined.get)
-            confidence = combined[raw_predicted_cat]
-
-            abstention_info = self.apply_combined_abstention(
-                raw_predicted_cat=raw_predicted_cat,
-                confidence=confidence,
-                combined=combined,
-                overlap_map=overlap_map,
-            )
-            predicted_cat = abstention_info["predicted_cat"]
+            predicted_cat = max(combined, key=combined.get)
+            confidence = combined[predicted_cat]
 
             predicted_weight_component = (
                 (1.0 - self.config.temporal_weight)
-                * current_membership.get(raw_predicted_cat, 0.0)
+                * current_membership.get(predicted_cat, 0.0)
             )
             predicted_temporal_component = (
                 self.config.temporal_weight
-                * temporal_prior.get(raw_predicted_cat, 0.0)
+                * temporal_prior.get(predicted_cat, 0.0)
             )
 
             for cat in cats:
@@ -299,30 +221,10 @@ class FuzzyPredictor:
                 "event_timestamp": row["event_timestamp"],
                 "recorded_weight": row["scale_weight"],
                 "true_label": row["true_label_cat_name"],
-
-                "raw_predicted_cat": raw_predicted_cat,
                 "predicted_cat": predicted_cat,
-                "abstained": abstention_info["abstained"],
-                "abstention_reason": abstention_info["abstention_reason"],
-                "abstention_algorithm": self.ABSTENTION_ALGORITHM_NAME,
-
                 "confidence": round(confidence, 6),
                 "confidence_algorithm": self.CONFIDENCE_ALGORITHM_NAME,
                 "confidence_formula": self.CONFIDENCE_FORMULA,
-                "confidence_threshold": self.config.confidence_threshold,
-                "top1_score": round(abstention_info["top1_score"], 6),
-                "top2_score": (
-                    round(abstention_info["top2_score"], 6)
-                    if not pd.isna(abstention_info["top2_score"])
-                    else np.nan
-                ),
-                "top1_top2_gap": round(abstention_info["top1_top2_gap"], 6),
-                "score_gap_threshold": self.config.score_gap_threshold,
-                "predicted_overlap_for_abstention": round(
-                    abstention_info["predicted_overlap_for_abstention"], 6
-                ),
-                "overlap_abstention_threshold": self.config.overlap_abstention_threshold,
-
                 "predicted_weight_component": round(predicted_weight_component, 6),
                 "predicted_temporal_component": round(predicted_temporal_component, 6),
                 "gap_minutes": gap_minutes if gap_minutes is not None else np.nan,
@@ -363,9 +265,7 @@ class FuzzyPredictor:
             "dominant_cat": day_cat,
             "dominant_cat_avg_score": round(day_conf, 6),
             "confidence_algorithm": self.CONFIDENCE_ALGORITHM_NAME,
-            "abstention_algorithm": self.ABSTENTION_ALGORITHM_NAME,
             "events_in_day": len(df_day),
-            "abstained_events_in_day": int(row_result_df["abstained"].sum()) if not row_result_df.empty else 0,
         }
 
         for cat in cats:

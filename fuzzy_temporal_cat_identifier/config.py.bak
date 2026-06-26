@@ -51,21 +51,6 @@ class FuzzyTemporalConfig:
     low_consistency_score: float = 0.50
     medium_consistency_score: float = 0.70
 
-    # =====================================================
-    # ABSTENTION CONFIG - Combined strategy
-    # =====================================================
-    use_abstention: bool = True
-    abstain_label: str = "unknown"
-
-    # Abstain if confidence is lower than this value.
-    confidence_threshold: float = 0.50
-
-    # Abstain if overlap of raw predicted cat is above this value.
-    overlap_abstention_threshold: float = 0.70
-
-    # Abstain if top-1 and top-2 combined scores are too close.
-    score_gap_threshold: float = 0.10
-
     @property
     def kg_to_lb(self) -> float:
         return 1.0 / self.lb_to_kg

@@ -7,13 +7,22 @@ from fuzzy_predictor import FuzzyPredictor, FuzzyPredictionOutput
 from debug_output_saver import DebugOutputSaver
 
 
+def _safe_selective_accuracy(row_df: pd.DataFrame) -> float:
+    if row_df.empty or "abstained" not in row_df.columns:
+        return 0.0
+    non_abstained = row_df[~row_df["abstained"]]
+    if non_abstained.empty:
+        return 0.0
+    return float(non_abstained["correct"].mean())
+
+
 def run_triangular_fuzzy_temporal_pipeline_from_dataframe(
     df: pd.DataFrame,
     config: FuzzyTemporalTriangularConfig,
     save_outputs: bool = False,
     save_confusion_matrices: bool = True,
 ) -> FuzzyPredictionOutput:
-    """Function-based orchestrator with updated selective validation mapping rules."""
+    """Function-based orchestrator with combined abstention."""
     loader = CatVisitDataLoader(config)
     diagnostic = FuzzyDiagnostic(config)
     predictor = FuzzyPredictor(config)
@@ -24,9 +33,14 @@ def run_triangular_fuzzy_temporal_pipeline_from_dataframe(
         if not config.root_output_folder:
             raise ValueError("root_output_folder is required when saving outputs/confusion matrices.")
         saver.ensure_folder()
-    
-    all_results, all_daily_summaries, all_inconsistencies, accuracy_records, cm_status_records = [], [], [], [], []
-    
+
+    all_results = []
+    all_daily_summaries = []
+    all_inconsistencies = []
+    accuracy_records = []
+    abstention_records = []
+    cm_status_records = []
+
     for user_id in unique_users:
         df_user = loader.get_user_dataframe(prepared_df, user_id)
         if df_user.empty:
@@ -46,12 +60,13 @@ def run_triangular_fuzzy_temporal_pipeline_from_dataframe(
             
             row_df["correct_raw"] = row_df["raw_predicted_name"] == row_df["true_label"]
             row_df["correct"] = (~row_df["abstained"]) & (row_df["predicted_name"] == row_df["true_label"])
-            
+
+            raw_accuracy = float(row_df["correct_raw"].mean())
             user_coverage = float((~row_df["abstained"]).mean())
             user_ar = float(row_df["abstained"].mean())
             user_overall = float(row_df["correct"].mean())
-            user_selective = float(row_df.loc[~row_df["abstained"], "correct"].mean()) if (~row_df["abstained"]).sum() > 0 else 0.0
-            
+            user_selective = _safe_selective_accuracy(row_df)
+
             if not daily_summary_df.empty:
                 daily_summary_df["dominant_name"] = daily_summary_df["dominant_cat"].map(name_map)
             all_results.append(row_df)
@@ -59,12 +74,25 @@ def run_triangular_fuzzy_temporal_pipeline_from_dataframe(
                 all_daily_summaries.append(daily_summary_df)
                 
             accuracy_records.append({
-                "user_id": user_id, 
-                "overall_accuracy": round(user_overall, 6),
-                "selective_accuracy": round(user_selective, 6),
+                "user_id": user_id,
+                "raw_accuracy_without_abstention": round(raw_accuracy, 6),
+                "overall_accuracy_with_abstention": round(user_overall, 6),
+                "selective_accuracy_non_abstained": round(user_selective, 6),
                 "coverage": round(user_coverage, 6),
                 "abstention_rate": round(user_ar, 6),
-                "total_events": len(row_df)
+                "total_events": int(len(row_df)),
+                "non_abstained_events": int((~row_df["abstained"]).sum()),
+                "abstained_events": int(row_df["abstained"].sum()),
+            })
+
+            abstention_records.append({
+                "user_id": user_id,
+                "total_events": int(len(row_df)),
+                "abstained_events": int(row_df["abstained"].sum()),
+                "non_abstained_events": int((~row_df["abstained"]).sum()),
+                "coverage": round(user_coverage, 6),
+                "abstention_rate": round(user_ar, 6),
+                "reason_counts": str(row_df["abstention_reason"].value_counts(dropna=False).to_dict()),
             })
             
         if inconsistency_df is not None and not inconsistency_df.empty:
@@ -76,25 +104,38 @@ def run_triangular_fuzzy_temporal_pipeline_from_dataframe(
             user_cm_png = os.path.join(config.root_output_folder, f"user_{user_id}_confusion_matrix.png")
             user_cm_csv = os.path.join(config.root_output_folder, f"user_{user_id}_confusion_matrix_values.csv")
             if not row_df.empty:
-                status = saver.save_confusion_matrix_outputs(row_df["true_label"], row_df["predicted_name"], user_cm_png, user_cm_csv, f"Temporal Confusion Matrix - User {user_id}")
+                status = saver.save_confusion_matrix_outputs(
+                    row_df["true_label"],
+                    row_df["predicted_name"],
+                    user_cm_png,
+                    user_cm_csv,
+                    f"Temporal Confusion Matrix With Abstention - User {user_id}",
+                )
             else:
                 msg = "No prediction data available for this user."
                 saver.save_placeholder_png(user_cm_png, f"Temporal Confusion Matrix - User {user_id}", msg)
                 saver.save_placeholder_cm_csv(user_cm_csv, msg)
                 status = "placeholder_no_prediction_data"
-            cm_status_records.append({"user_id": user_id, "png_path": user_cm_png, "csv_path": user_cm_csv, "status": status})
-            
+
+            cm_status_records.append({
+                "user_id": user_id,
+                "png_path": user_cm_png,
+                "csv_path": user_cm_csv,
+                "status": status,
+            })
+
     final_row_results = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
     final_daily_summary = pd.concat(all_daily_summaries, ignore_index=True) if all_daily_summaries else pd.DataFrame()
     user_accuracy_df = pd.DataFrame(accuracy_records) if accuracy_records else pd.DataFrame()
+    abstention_summary_df = pd.DataFrame(abstention_records) if abstention_records else pd.DataFrame()
     inconsistency_report_df = pd.concat(all_inconsistencies, ignore_index=True) if all_inconsistencies else pd.DataFrame()
     
     # Calculate global tracking macro diagnostics
     overall_accuracy = float(final_row_results["correct"].mean()) if not final_row_results.empty else 0.0
     coverage = float((~final_row_results["abstained"]).mean()) if not final_row_results.empty else 0.0
     abstention_rate = float(final_row_results["abstained"].mean()) if not final_row_results.empty else 0.0
-    selective_accuracy = float(final_row_results.loc[~final_row_results["abstained"], "correct"].mean()) if not final_row_results.empty and (~final_row_results["abstained"]).sum() > 0 else 0.0
-    
+    selective_accuracy = _safe_selective_accuracy(final_row_results)
+
     output = FuzzyPredictionOutput(
         row_results=final_row_results,
         daily_summary=final_daily_summary,
@@ -105,12 +146,34 @@ def run_triangular_fuzzy_temporal_pipeline_from_dataframe(
         coverage=coverage,
         abstention_rate=abstention_rate,
         confidence_algorithm=predictor.confidence_algorithm_metadata(),
-        abstention_algorithm=predictor.abstention_algorithm_metadata()
+        abstention_algorithm=predictor.abstention_algorithm_metadata(),
+        abstention_summary=abstention_summary_df,
     )
     if save_outputs:
         saver.save_all_outputs(output)
+        if config.root_output_folder:
+            abstention_summary_df.to_csv(
+                os.path.join(config.root_output_folder, "abstention_summary.csv"),
+                index=False,
+            )
+            pd.DataFrame([
+                {"key": "name", "value": output.abstention_algorithm.get("name")},
+                {"key": "decision_rule", "value": output.abstention_algorithm.get("decision_rule")},
+                {"key": "abstain_label", "value": output.abstention_algorithm.get("abstain_label")},
+                {"key": "parameter.confidence_threshold", "value": config.confidence_threshold},
+                {"key": "parameter.overlap_abstention_threshold", "value": config.overlap_abstention_threshold},
+                {"key": "parameter.score_gap_threshold", "value": config.score_gap_threshold},
+            ]).to_csv(
+                os.path.join(config.root_output_folder, "abstention_algorithm.csv"),
+                index=False,
+            )
+
     if save_confusion_matrices and config.root_output_folder:
-        pd.DataFrame(cm_status_records).to_csv(os.path.join(config.root_output_folder, "confusion_matrix_status.csv"), index=False)
+        pd.DataFrame(cm_status_records).to_csv(
+            os.path.join(config.root_output_folder, "confusion_matrix_status.csv"),
+            index=False,
+        )
+
     return output
 
 
@@ -122,4 +185,9 @@ def run_triangular_fuzzy_temporal_pipeline_from_csv(
 ) -> FuzzyPredictionOutput:
     loader = CatVisitDataLoader(config)
     raw_df = loader.load_csv(input_file)
-    return run_triangular_fuzzy_temporal_pipeline_from_dataframe(raw_df, config, save_outputs, save_confusion_matrices)
+    return run_triangular_fuzzy_temporal_pipeline_from_dataframe(
+        raw_df,
+        config,
+        save_outputs,
+        save_confusion_matrices,
+    )
