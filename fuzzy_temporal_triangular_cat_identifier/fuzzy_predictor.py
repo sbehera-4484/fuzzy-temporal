@@ -14,13 +14,18 @@ class FuzzyPredictionOutput:
     user_accuracy: pd.DataFrame
     inconsistency_report: pd.DataFrame
     overall_accuracy: float
+    selective_accuracy: float  # Added metric
+    coverage: float            # Added metric
+    abstention_rate: float     # Added metric
     confidence_algorithm: Dict[str, Any]
+    abstention_algorithm: Dict[str, Any]  # Added metadata
 
 
 class FuzzyPredictor:
-    """Temporal fuzzy predictor using triangular-selected dynamic sigma artifacts."""
+    """Temporal fuzzy predictor using triangular-selected dynamic sigma artifacts with abstention."""
     CONFIDENCE_ALGORITHM_NAME = "normalized_fuzzy_temporal_confidence_with_triangular_sigma"
     CONFIDENCE_FORMULA = "confidence = max_cat(normalize((1 - temporal_weight) * current_weight_membership + temporal_weight * temporal_prior))"
+    ABSTENTION_ALGORITHM_NAME = "combined_confidence_overlap_gap_abstention"
 
     def __init__(self, config: FuzzyTemporalTriangularConfig):
         self.config = config
@@ -55,6 +60,17 @@ class FuzzyPredictor:
             },
         }
 
+    def abstention_algorithm_metadata(self) -> Dict[str, Any]:
+        return {
+            "name": self.ABSTENTION_ALGORITHM_NAME,
+            "decision_rule": "confidence<threshold OR overlap>threshold OR top1_top2_gap<threshold",
+            "parameters": {
+                "confidence_threshold": self.config.confidence_threshold,
+                "overlap_abstention_threshold": self.config.overlap_abstention_threshold,
+                "score_gap_threshold": self.config.score_gap_threshold
+            }
+        }
+
     def apply_overlap_penalty(self, scores, overlap_map):
         adjusted = {}
         for cat, score in scores.items():
@@ -71,6 +87,32 @@ class FuzzyPredictor:
             factor = 1.0 - self.config.consistency_penalty_strength * (1.0 - consistency)
             adjusted[cat] = score * max(factor, self.config.min_score_factor)
         return self.normalize_scores(adjusted)
+
+    def apply_combined_abstention(self, raw_cat, confidence, combined, overlap_map):
+        ordered = sorted(combined.items(), key=lambda kv: kv[1], reverse=True)
+        top1 = ordered[0][1]
+        top2 = ordered[1][1] if len(ordered) > 1 else np.nan
+        gap = (top1 - top2) if len(ordered) > 1 else 1.0
+        ov = overlap_map.get(raw_cat, 0.0) if overlap_map is not None else 0.0
+        
+        reasons = []
+        if confidence < self.config.confidence_threshold:
+            reasons.append("low_confidence")
+        if ov > self.config.overlap_abstention_threshold:
+            reasons.append("high_overlap")
+        if gap < self.config.score_gap_threshold:
+            reasons.append("small_top1_top2_gap")
+            
+        abst = self.config.use_abstention and bool(reasons)
+        return {
+            "predicted_cat": self.config.abstain_label if abst else raw_cat,
+            "abstained": abst,
+            "abstention_reason": ";".join(reasons) if reasons else "none",
+            "top1_score": top1,
+            "top2_score": top2,
+            "top1_top2_gap": gap,
+            "predicted_overlap_for_abstention": ov
+        }
 
     def compute_weight_membership(self, row, catalog, sigma_map=None, overlap_map=None, consistency_map=None):
         measured_weight_kg = row["scale_weight"]
@@ -110,10 +152,18 @@ class FuzzyPredictor:
             combined = self.normalize_scores(combined)
             updated_state = {cat: self.config.state_alpha * combined.get(cat, 0.0) + (1.0 - self.config.state_alpha) * latent_state.get(cat, 0.0) for cat in cats}
             updated_state = self.normalize_scores(updated_state)
-            predicted_cat = max(combined, key=combined.get)
-            confidence = combined[predicted_cat]
-            predicted_weight_component = (1.0 - self.config.temporal_weight) * current_membership.get(predicted_cat, 0.0)
-            predicted_temporal_component = self.config.temporal_weight * temporal_prior.get(predicted_cat, 0.0)
+            
+            # --- ABSTENTION EVALUATION ENGINE ---
+            raw_cat = max(combined, key=combined.get)
+            conf = combined[raw_cat]
+            abst = self.apply_combined_abstention(raw_cat, conf, combined, overlap_map)
+            
+            predicted_cat = abst["predicted_cat"]
+            confidence = conf
+            # ------------------------------------
+            
+            predicted_weight_component = (1.0 - self.config.temporal_weight) * current_membership.get(raw_cat, 0.0)
+            predicted_temporal_component = self.config.temporal_weight * temporal_prior.get(raw_cat, 0.0)
             for cat in cats:
                 cumulative_day_scores[cat] += combined.get(cat, 0.0)
             row_result = {
@@ -123,8 +173,15 @@ class FuzzyPredictor:
                 "event_timestamp": row["event_timestamp"],
                 "recorded_weight": row["scale_weight"],
                 "true_label": row["true_label_cat_name"],
+                "raw_predicted_cat": raw_cat,
                 "predicted_cat": predicted_cat,
+                "abstained": abst["abstained"],
+                "abstention_reason": abst["abstention_reason"],
                 "confidence": round(confidence, 6),
+                "top1_score": round(abst["top1_score"], 6),
+                "top2_score": round(abst["top2_score"], 6) if not pd.isna(abst["top2_score"]) else np.nan,
+                "top1_top2_gap": round(abst["top1_top2_gap"], 6),
+                "predicted_overlap_for_abstention": round(abst["predicted_overlap_for_abstention"], 6),
                 "confidence_algorithm": self.CONFIDENCE_ALGORITHM_NAME,
                 "confidence_formula": self.CONFIDENCE_FORMULA,
                 "predicted_weight_component": round(predicted_weight_component, 6),
@@ -162,6 +219,7 @@ class FuzzyPredictor:
             "confidence_algorithm": self.CONFIDENCE_ALGORITHM_NAME,
             "sigma_selection_method": "triangular_sigma_band_selection_in_pounds",
             "events_in_day": len(df_day),
+            "abstained_events_in_day": int(row_result_df["abstained"].sum())
         }
         for cat in cats:
             day_summary[f"day_total_score_{cat}"] = round(cumulative_day_scores.get(cat, 0.0), 6)

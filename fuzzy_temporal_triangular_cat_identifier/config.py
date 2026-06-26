@@ -26,6 +26,15 @@ class FuzzyTemporalTriangularConfig:
     medium_overlap_score: float = 0.40
     low_consistency_score: float = 0.50
     medium_consistency_score: float = 0.70
+    
+    # === ABSTENTION LOGIC ADDITIONS ===
+    use_abstention: bool = True
+    abstain_label: str = "unknown"
+    confidence_threshold: float = 0.50
+    overlap_abstention_threshold: float = 0.70
+    score_gap_threshold: float = 0.10
+    # ==================================
+
     sigma_bands_lb: dict = field(default_factory=lambda: {
         "sigma_0_5_to_1_0_lb": {"left": 0.5, "center": 0.75, "right": 1.0, "representative": 0.75},
         "sigma_1_0_to_2_0_lb": {"left": 1.0, "center": 1.5, "right": 2.0, "representative": 1.5},
