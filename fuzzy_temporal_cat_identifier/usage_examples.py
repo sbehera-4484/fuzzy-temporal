@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 
 from config import FuzzyTemporalConfig
@@ -48,6 +49,98 @@ def example_run_from_csv_save_outputs():
     print(result.row_results.head())
     print(result.abstention_summary.head())
     print(result.user_accuracy.head())
+
+
+# =========================================================
+# USAGE EXAMPLE 1B: Run from CSV for ALL users in subfolders
+# =========================================================
+
+def example_run_from_csv_save_outputs_all_users():
+    """
+    Processes all user_ids stored as subfolders.
+    Each subfolder contains a CSV file with the same name as the folder.
+    """
+    base_folder = r"C:\Users\shreetam_behera\Downloads\WBID_Scenarios\WBID_MultipleCats_Overlapping_Dataset"
+    
+    # Get all subfolders
+    try:
+        subfolders = [f for f in os.listdir(base_folder) 
+                      if os.path.isdir(os.path.join(base_folder, f))]
+    except FileNotFoundError:
+        print(f"Base folder not found: {base_folder}")
+        return
+    
+    print(f"Found {len(subfolders)} user folders to process\n")
+    
+    results_summary = []
+    
+    for user_folder in sorted(subfolders):
+        user_id = user_folder
+        input_file = os.path.join(base_folder, user_folder, f"{user_folder}.csv")
+        output_folder = os.path.join(base_folder, user_folder)
+        
+        # Check if CSV file exists
+        if not os.path.exists(input_file):
+            print(f"⚠️  Skipping {user_id}: {input_file} not found")
+            continue
+        
+        print(f"Processing user {user_id}...")
+        
+        try:
+            config = FuzzyTemporalConfig(
+                root_output_folder=output_folder,
+                base_sigma_lb=0.15,
+                temporal_weight=0.40,
+                state_alpha=0.60,
+                decay_minutes=180.0,
+                device_col="device_serial",
+                use_abstention=False,
+                confidence_threshold=0.50,
+                overlap_abstention_threshold=0.70,
+                score_gap_threshold=0.10,
+                abstain_label="unknown",
+                use_dynamic_sigma_in_prediction=True,
+                use_overlap_penalty_in_prediction=True,
+                use_consistency_penalty_in_prediction=True,
+            )
+
+            result = run_fuzzy_temporal_pipeline_from_csv(
+                input_file=input_file,
+                config=config,
+                save_outputs=True,
+                save_confusion_matrices=True,
+            )
+
+            # Store summary results
+            results_summary.append({
+                "user_id": user_id,
+                "overall_accuracy": result.overall_accuracy,
+                "selective_accuracy": result.selective_accuracy,
+                "coverage": result.coverage,
+                "abstention_rate": result.abstention_rate,
+                "total_events": len(result.row_results),
+                "abstained_events": result.row_results["abstained"].sum(),
+            })
+            
+            print(f"  ✓ Overall accuracy: {result.overall_accuracy:.4f}")
+            print(f"  ✓ Selective accuracy: {result.selective_accuracy:.4f}")
+            print(f"  ✓ Coverage: {result.coverage:.4f}")
+            print(f"  ✓ Abstention rate: {result.abstention_rate:.4f}\n")
+            
+        except Exception as e:
+            print(f"  ✗ Error processing user {user_id}: {str(e)}\n")
+            continue
+    
+    # Print summary table
+    if results_summary:
+        print("\n" + "="*80)
+        print("SUMMARY OF ALL USERS")
+        print("="*80)
+        summary_df = pd.DataFrame(results_summary)
+        print(summary_df.to_string(index=False))
+        print(f"\nMean overall accuracy: {summary_df['overall_accuracy'].mean():.4f}")
+        print(f"Mean selective accuracy: {summary_df['selective_accuracy'].mean():.4f}")
+        print(f"Mean coverage: {summary_df['coverage'].mean():.4f}")
 
 
 # =========================================================
@@ -225,6 +318,7 @@ def test_abstention_logic_with_synthetic_data():
 if __name__ == "__main__":
     # Uncomment one example at a time.
     # example_run_from_csv_save_outputs()
+    example_run_from_csv_save_outputs_all_users()  # Process all users in subfolders
     # example_load_dataframe_then_run()
-    example_in_memory_only()
-    test_abstention_logic_with_synthetic_data()
+    # example_in_memory_only()
+    # test_abstention_logic_with_synthetic_data()
